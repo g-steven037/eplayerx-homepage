@@ -1,4 +1,4 @@
-# EPlayerX API 服务 
+# EPlayerX API 服务
 
 [English](./README.en.md) | **简体中文**
 
