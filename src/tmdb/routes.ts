@@ -6,23 +6,6 @@ const tmdbApp = new Hono();
 const TMDB_IMAGE_CACHE_CONTROL =
   "public, max-age=31536000, s-maxage=31536000, immutable";
 
-function workersDefaultCache():
-  | {
-      match(request: Request): Promise<Response | undefined>;
-      put(request: Request, response: Response): Promise<void>;
-    }
-  | undefined {
-  const w = globalThis as typeof globalThis & {
-    caches?: {
-      default: {
-        match(request: Request): Promise<Response | undefined>;
-        put(request: Request, response: Response): Promise<void>;
-      };
-    };
-  };
-  return w.caches?.default;
-}
-
 // Movie sort_by type and validation
 type MovieSortBy =
   | "original_title.asc"
@@ -351,6 +334,26 @@ tmdbApp.get("/tv/images", async (c) => {
       },
     },
   });
+  if (result.response.status !== 200) {
+    return c.json({ error: result.error }, 500);
+  }
+  return c.json(result.data);
+});
+
+tmdbApp.get("/tv/season/images", async (c) => {
+  const id = c.req.query("id") || "";
+  const seasonNumber = c.req.query("seasonNumber") || "";
+  const result = await tmdb.GET(
+    `/3/tv/${Number(id)}/season/${Number(seasonNumber)}/images`,
+    {
+      params: {
+        path: {
+          series_id: Number(id),
+          season_number: Number(seasonNumber),
+        },
+      },
+    }
+  );
   if (result.response.status !== 200) {
     return c.json({ error: result.error }, 500);
   }
@@ -822,18 +825,11 @@ tmdbApp.get("/image/*", async (c) => {
     return c.json({ error: "Invalid image path" }, 400);
   }
 
-  const cache = workersDefaultCache();
-  const cacheRequest = new Request(c.req.url, { method: "GET" });
-  if (cache) {
-    const cached = await cache.match(cacheRequest);
-    if (cached) {
-      return cached;
-    }
-  }
-
+  // Proxy via Worker (origin may be reachable where image.tmdb.org is not).
   const imageUrl = new URL(path, "https://image.tmdb.org/t/p/").href;
-
-  const onCf = cache !== undefined;
+  const onCf =
+    (globalThis as { caches?: { default?: unknown } }).caches?.default !==
+    undefined;
   const upstream = await fetch(
     imageUrl,
     onCf
@@ -846,23 +842,14 @@ tmdbApp.get("/image/*", async (c) => {
     return c.json({ error: "Failed to fetch image" }, 502);
   }
 
-  const contentType = upstream.headers.get("content-type") || "image/jpeg";
-  const headers = new Headers({
-    "Content-Type": contentType,
-    "Cache-Control": TMDB_IMAGE_CACHE_CONTROL,
-  });
-
-  const forCache = upstream.clone();
-  const outgoing = new Response(upstream.body, { headers });
-
-  if (cache && c.executionCtx) {
-    const responseToStore = new Response(forCache.body, {
-      headers: new Headers(headers),
-    });
-    c.executionCtx.waitUntil(cache.put(cacheRequest, responseToStore));
+  const headers = new Headers();
+  const ct = upstream.headers.get("content-type");
+  if (ct) {
+    headers.set("Content-Type", ct);
   }
+  headers.set("Cache-Control", TMDB_IMAGE_CACHE_CONTROL);
 
-  return outgoing;
+  return new Response(upstream.body, { status: upstream.status, headers });
 });
 
 export default tmdbApp;
